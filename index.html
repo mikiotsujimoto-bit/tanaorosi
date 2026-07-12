@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>棚卸し在庫入力</title>
+
+<!-- QRコード読取ライブラリ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<!-- Microsoft認証ライブラリ(MSAL) -->
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+
+<style>
+  :root{
+    --ink:#1a2332;
+    --paper:#f7f5f0;
+    --steel:#3d5a73;
+    --steel-dark:#2b4152;
+    --amber:#d98e3f;
+    --ok:#3f7d5c;
+    --err:#c14545;
+    --line:#d8d3c8;
+    --radius:10px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{
+    font-family:-apple-system,"Hiragino Sans","Yu Gothic",sans-serif;
+    background:var(--paper);
+    color:var(--ink);
+    display:flex;
+    flex-direction:column;
+    min-height:100vh;
+  }
+
+  header{
+    padding:14px 20px;
+    background:var(--steel-dark);
+    color:#fff;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+  }
+  header .title{font-size:15px; font-weight:600; letter-spacing:.02em;}
+  header .right{display:flex; align-items:center; gap:10px;}
+  header .worker-chip{
+    font-size:12px; background:rgba(255,255,255,.14); padding:5px 10px; border-radius:20px; cursor:pointer;
+  }
+  header .round-chip{
+    font-size:12px; padding:5px 10px; border-radius:20px; cursor:pointer;
+  }
+  header .round-chip.month{ background:rgba(168,213,181,.25); color:#a8d5b5; }
+  header .round-chip.spot{ background:rgba(217,142,63,.28); color:#f0c48f; }
+  header .status{font-size:11px; opacity:.75;}
+  header .status.connected{color:#a8d5b5;}
+
+  main{flex:1; padding:16px; display:flex; flex-direction:column; gap:14px; max-width:480px; width:100%; margin:0 auto;}
+
+  .step-bar{display:flex; gap:6px; padding:0 4px;}
+  .step-bar span{flex:1; height:3px; background:var(--line); border-radius:2px;}
+  .step-bar span.active{background:var(--steel);}
+  .step-bar span.done{background:var(--ok);}
+
+  .card{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:18px;
+  }
+
+  .step-head{display:flex; align-items:center; gap:10px; margin-bottom:12px;}
+  .step-num{
+    width:26px; height:26px; border-radius:50%; background:var(--steel); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; flex-shrink:0;
+  }
+  .step-title{font-size:15px; font-weight:700;}
+  .step-guide{font-size:12.5px; color:#6b7280; line-height:1.6; margin:0 0 14px 36px;}
+
+  #reader{width:100%; border-radius:var(--radius); overflow:hidden;}
+
+  .field-label{font-size:11px; color:#6b7280; letter-spacing:.05em; text-transform:uppercase; margin-bottom:4px;}
+  .field-value{font-size:20px; font-weight:600; margin-bottom:14px;}
+  .field-value.muted{color:#9ca3af; font-weight:400; font-size:15px;}
+  .field-value.new-item{color:var(--amber);}
+
+  .qty-input{
+    width:100%;
+    font-size:34px;
+    font-weight:700;
+    text-align:center;
+    padding:14px;
+    border:2px solid var(--line);
+    border-radius:var(--radius);
+    background:var(--paper);
+    color:var(--ink);
+  }
+  .qty-input:focus{outline:none; border-color:var(--steel);}
+
+  .name-input{
+    width:100%;
+    font-size:18px;
+    padding:14px;
+    border:2px solid var(--line);
+    border-radius:var(--radius);
+    background:var(--paper);
+    color:var(--ink);
+    text-align:center;
+  }
+  .name-input:focus{outline:none; border-color:var(--steel);}
+
+  .btn{
+    width:100%;
+    padding:16px;
+    border:none;
+    border-radius:var(--radius);
+    font-size:16px;
+    font-weight:600;
+    cursor:pointer;
+    transition:opacity .15s;
+  }
+  .btn:active{opacity:.75;}
+  .btn-primary{background:var(--steel); color:#fff;}
+  .btn-primary:disabled{background:#b9c2ca; cursor:not-allowed;}
+  .btn-secondary{background:transparent; color:var(--steel); border:1.5px solid var(--steel);}
+  .btn-amber{background:var(--amber); color:#fff;}
+
+  .msg{
+    padding:12px 14px;
+    border-radius:var(--radius);
+    font-size:14px;
+    display:none;
+  }
+  .msg.show{display:block;}
+  .msg.err{background:#fbe9e9; color:var(--err); border:1px solid #f0c4c4;}
+  .msg.ok{background:#e8f3ec; color:var(--ok); border:1px solid #bfe0cc;}
+
+  .center-screen{
+    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; text-align:center; padding:20px;
+  }
+  .center-screen h1{font-size:19px; margin:0;}
+  .center-screen p{font-size:13px; color:#6b7280; margin:0; max-width:280px; line-height:1.6;}
+
+  .hidden{display:none !important;}
+
+  .log-line{
+    font-size:12.5px; color:#4b5563; padding:8px 10px; border-bottom:1px solid var(--line);
+    display:flex; justify-content:space-between; gap:8px;
+  }
+  .log-line:last-child{border-bottom:none;}
+  .log-empty{font-size:12.5px; color:#9ca3af; text-align:center; padding:10px;}
+
+  .type-choice{
+    width:100%; max-width:280px; padding:20px; border-radius:var(--radius); border:2px solid var(--line);
+    background:#fff; font-size:16px; font-weight:700; cursor:pointer; text-align:left; display:flex; flex-direction:column; gap:4px;
+  }
+  .type-choice small{font-size:12px; font-weight:400; color:#6b7280;}
+  .type-choice:active{opacity:.75;}
+  .type-choice.month{border-color:var(--ok);}
+  .type-choice.spot{border-color:var(--amber);}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="title">棚卸し在庫入力</span>
+  <div class="right">
+    <span class="round-chip hidden" id="roundChip" onclick="openTypeScreen()">-</span>
+    <span class="worker-chip hidden" id="workerChip" onclick="openWorkerScreen()">-</span>
+    <span class="status" id="connStatus">未接続</span>
+  </div>
+</header>
+
+<!-- ① ログイン前画面 -->
+<div class="center-screen" id="loginScreen">
+  <h1>Excel在庫表に接続</h1>
+  <p>Microsoftアカウントでサインインすると、共有されている棚卸し表につながります。会社のスマホでも自分のスマホでも、同じ手順で使えます。</p>
+  <button class="btn btn-primary" style="width:220px;" onclick="signIn()">サインイン</button>
+</div>
+
+<!-- ② 担当者名入力画面（サインイン後・初回のみ／変更時） -->
+<div class="center-screen hidden" id="workerScreen">
+  <h1>あなたのお名前は？</h1>
+  <p>入力した在庫数の記録に「誰が数えたか」として残ります。次回からは自動で表示されます。</p>
+  <input type="text" class="name-input" id="workerNameInput" placeholder="例：山田" style="max-width:240px;">
+  <button class="btn btn-primary" style="width:220px;" onclick="saveWorkerName()">この名前で始める</button>
+</div>
+
+<!-- ③ 棚卸し種別選択画面 -->
+<div class="center-screen hidden" id="typeScreen">
+  <h1>今日の棚卸しは？</h1>
+  <p>選んだ内容によって記録の集計方法が変わります。通常の月末棚卸しか、臨時のスポット棚卸しかを選んでください。</p>
+  <button class="type-choice month" onclick="selectRoundType('月末')">
+    月末棚卸し
+    <small>毎月の定例。月ごとに全体を集計します</small>
+  </button>
+  <button class="type-choice spot" onclick="selectRoundType('スポット')">
+    スポット棚卸し
+    <small>臨時・一部商品のみの確認。月末集計には含まれません</small>
+  </button>
+</div>
+
+<!-- ④ メイン画面 -->
+<main class="hidden" id="mainScreen">
+
+  <div class="step-bar">
+    <span id="stepDot1" class="active"></span>
+    <span id="stepDot2"></span>
+    <span id="stepDot3"></span>
+  </div>
+
+  <!-- STEP1: スキャン -->
+  <div id="stepScan" class="card">
+    <div class="step-head"><span class="step-num">1</span><span class="step-title">商品のQRコードを読み取る</span></div>
+    <p class="step-guide">商品ラベルのQRコードをカメラに映してください。自動的に読み取ります。QRが無い・汚れて読めない場合は下の欄に商品コードを直接入力してもOKです。<br>（現在の種別：<span id="stepGuideRoundType">-</span>。変更は画面上部のバッジから）</p>
+    <div id="reader"></div>
+    <div style="margin-top:12px;">
+      <input type="text" id="manualCode" placeholder="商品コードを直接入力（QRが読めないとき）"
+        style="width:100%;padding:12px;border:1px solid var(--line);border-radius:8px;font-size:15px;">
+      <button class="btn btn-secondary" style="margin-top:8px;" onclick="lookupCode(document.getElementById('manualCode').value)">このコードで検索</button>
+    </div>
+  </div>
+
+  <!-- STEP2: 確認 -->
+  <div id="stepConfirm" class="card hidden">
+    <div class="step-head"><span class="step-num">2</span><span class="step-title">商品を確認する</span></div>
+    <p class="step-guide">読み取った商品が正しいか確認してください。違う場合は「やり直す」からもう一度スキャンできます。</p>
+    <div class="field-label">商品コード</div>
+    <div class="field-value" id="confCode">-</div>
+    <div class="field-label">商品名</div>
+    <div class="field-value" id="confName">-</div>
+    <button class="btn btn-primary" onclick="goToInput()">この商品で数を数える</button>
+    <button class="btn btn-secondary" style="margin-top:8px;" onclick="backToScan()">やり直す</button>
+  </div>
+
+  <!-- STEP3: 入力・反映 -->
+  <div id="stepInput" class="card hidden">
+    <div class="step-head"><span class="step-num">3</span><span class="step-title">数えた個数を入力する</span></div>
+    <p class="step-guide">今、目の前にある個数をそのまま入力してください。同じ商品を複数回・複数人で数えてもすべて記録されるので、上書きの心配はありません。</p>
+    <input type="number" inputmode="numeric" class="qty-input" id="newQty" placeholder="0">
+    <div style="height:14px;"></div>
+    <button class="btn btn-amber" id="submitBtn" onclick="submitQty()">この数を記録する</button>
+    <button class="btn btn-secondary" style="margin-top:8px;" onclick="backToScan()">キャンセル</button>
+  </div>
+
+  <div class="msg" id="msgBox"></div>
+
+  <!-- 直近の記録（自分の入力ログ、安心確認用） -->
+  <div class="card" id="recentCard">
+    <div class="field-label" style="margin-bottom:8px;">最近あなたが記録した内容</div>
+    <div id="recentLog"><div class="log-empty">まだ記録がありません</div></div>
+  </div>
+
+</main>
+
+<script>
+/* ============================================================
+   設定 — ★ここを利用者ごとに書き換えてください★
+   ============================================================ */
+const CONFIG = {
+  // Azure ADアプリ登録で取得したクライアントID
+  clientId: "YOUR_AZURE_APP_CLIENT_ID",
+  // 個人のMicrosoftアカウントのみを対象とする場合は "consumers"
+  // 会社/学校アカウントも含める場合は "common"（複数人・複数種のアカウントで使うなら common 推奨）
+  authority: "https://login.microsoftonline.com/common",
+  // このPWAを配置するURL(GitHub Pagesなど)。Azure AD側のリダイレクトURIと一致させる
+  redirectUri: window.location.origin + window.location.pathname,
+
+  // ---- 共有Excelファイルの指定（複数人で同じファイルを扱うため、パスではなくID指定） ----
+  // 取得方法は下記「共有ファイルIDの調べ方」を参照してください
+  driveId: "YOUR_DRIVE_ID",
+  itemId: "YOUR_ITEM_ID",
+
+  // Excel内のテーブル名(あらかじめテーブル化しておく)
+  tableName: "在庫テーブル",
+  // マスタ参照用シート（商品コード→商品名の検索に使う。無ければテーブル内から検索）
+  // テーブルの列構成(0始まりの列インデックス) ※追記ログ方式：常に新しい行を追加していく
+  // roundType: "月末" or "スポット" / roundId: 月末なら"YYYY-MM"、スポットなら"YYYY-MM-DD"
+  columns: { code: 0, name: 1, qty: 2, worker: 3, timestamp: 4, roundType: 5, roundId: 6 }
+};
+
+/*
+============================================================
+共有ファイルIDの調べ方（初回セットアップ時に1度だけ実施）
+============================================================
+1. https://developer.microsoft.com/graph/graph-explorer を開き、
+   ファイル所有者のMicrosoftアカウントでサインイン
+2. GET https://graph.microsoft.com/v1.0/me/drive/root:/対象フォルダ/ファイル名.xlsx
+   を実行し、レスポンス内の "id"(=itemId) と "parentReference.driveId"(=driveId) を
+   このCONFIGにコピーする
+3. ファイルは事前にOneDrive上で「特定の人と共有」設定を行い、
+   在庫入力を行う全員のMicrosoftアカウントに「編集可能」権限を付与しておくこと
+============================================================
+*/
+
+/* ============================================================
+   MSAL初期化
+   ============================================================ */
+const msalInstance = new msal.PublicClientApplication({
+  auth: {
+    clientId: CONFIG.clientId,
+    authority: CONFIG.authority,
+    redirectUri: CONFIG.redirectUri
+  },
+  cache: { cacheLocation: "localStorage" }
+});
+
+const GRAPH_SCOPES = ["Files.ReadWrite"];
+let accessToken = null;
+let currentRow = null;   // 検索でヒットした商品情報を保持
+let workerName = localStorage.getItem("workerName") || "";
+let recentEntries = JSON.parse(localStorage.getItem("recentEntries") || "[]");
+let roundType = "";  // "月末" or "スポット"（起動のたびに選び直す。前回値は引き継がない）
+let roundId = "";
+
+async function signIn(){
+  try{
+    const result = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
+    msalInstance.setActiveAccount(result.account);
+    await acquireToken();
+    setStatus(true);
+    document.getElementById("loginScreen").classList.add("hidden");
+
+    if(workerName){
+      document.getElementById("typeScreen").classList.remove("hidden");
+    }else{
+      document.getElementById("workerScreen").classList.remove("hidden");
+    }
+  }catch(e){
+    showMsg("サインインに失敗しました: " + e.message, "err");
+  }
+}
+
+async function acquireToken(){
+  const account = msalInstance.getActiveAccount();
+  const result = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account });
+  accessToken = result.accessToken;
+}
+
+function setStatus(connected){
+  const el = document.getElementById("connStatus");
+  el.textContent = connected ? "接続中" : "未接続";
+  el.classList.toggle("connected", connected);
+}
+
+/* ---- 担当者名 ---- */
+function saveWorkerName(){
+  const v = document.getElementById("workerNameInput").value.trim();
+  if(!v){ return; }
+  workerName = v;
+  localStorage.setItem("workerName", workerName);
+  document.getElementById("workerScreen").classList.add("hidden");
+  document.getElementById("typeScreen").classList.remove("hidden");
+}
+function openWorkerScreen(){
+  document.getElementById("mainScreen").classList.add("hidden");
+  document.getElementById("workerNameInput").value = workerName;
+  document.getElementById("workerScreen").classList.remove("hidden");
+}
+
+/* ---- 棚卸し種別 ---- */
+function pad2(n){ return String(n).padStart(2,"0"); }
+function selectRoundType(type){
+  roundType = type;
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = pad2(now.getMonth()+1);
+  const d = pad2(now.getDate());
+  roundId = (type === "月末") ? `${y}-${m}` : `${y}-${m}-${d}`;
+
+  document.getElementById("typeScreen").classList.add("hidden");
+  enterMainScreen();
+}
+function openTypeScreen(){
+  document.getElementById("mainScreen").classList.add("hidden");
+  document.getElementById("typeScreen").classList.remove("hidden");
+}
+function enterMainScreen(){
+  document.getElementById("mainScreen").classList.remove("hidden");
+
+  const workerChip = document.getElementById("workerChip");
+  workerChip.textContent = "👤 " + workerName;
+  workerChip.classList.remove("hidden");
+
+  const roundChip = document.getElementById("roundChip");
+  roundChip.textContent = (roundType === "月末" ? "📅 月末棚卸し" : "📍 スポット棚卸し");
+  roundChip.className = "round-chip " + (roundType === "月末" ? "month" : "spot");
+  document.getElementById("stepGuideRoundType").textContent = roundType;
+
+  renderRecentLog();
+  startScanner();
+}
+
+/* ============================================================
+   Graph API呼び出し（共有ファイルをID指定でアクセス）
+   ============================================================ */
+const GRAPH_BASE = `https://graph.microsoft.com/v1.0/drives/${CONFIG.driveId}/items/${CONFIG.itemId}/workbook`;
+
+async function graphFetch(path, options={}){
+  await acquireToken(); // 期限切れ対策で毎回サイレント更新
+  const res = await fetch(GRAPH_BASE + path, {
+    ...options,
+    headers: {
+      "Authorization": "Bearer " + accessToken,
+      "Content-Type": "application/json",
+      ...(options.headers||{})
+    }
+  });
+  if(!res.ok){
+    const body = await res.text();
+    throw new Error(`Excelとの通信に失敗しました (${res.status})`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+// 商品コードで商品名を検索（過去の記録行から最初にヒットしたものを使う）
+async function lookupCode(code){
+  code = (code||"").trim();
+  if(!code){ showMsg("コードが空です", "err"); return; }
+  try{
+    showMsg("商品を検索しています...", "ok");
+    const data = await graphFetch(`/tables('${CONFIG.tableName}')/rows`);
+    const rows = data.value;
+    const hit = rows.find(r => String(r.values[0][CONFIG.columns.code]).trim() === code);
+
+    if(!hit){
+      currentRow = { code, name: "(マスタ未登録の商品コードです。担当者に確認してください)", isNew: true };
+    }else{
+      const v = hit.values[0];
+      currentRow = { code: v[CONFIG.columns.code], name: v[CONFIG.columns.name], isNew: false };
+    }
+    document.getElementById("confCode").textContent = currentRow.code;
+    const nameEl = document.getElementById("confName");
+    nameEl.textContent = currentRow.name;
+    nameEl.classList.toggle("new-item", currentRow.isNew);
+    goToStep(2);
+    hideMsg();
+  }catch(e){
+    showMsg(e.message, "err");
+  }
+}
+
+// 常に新しい行として追記する（上書きしないので複数人が同時に使っても安全）
+async function submitQty(){
+  const qty = document.getElementById("newQty").value;
+  if(qty === ""){ showMsg("数を入力してください", "err"); return; }
+  const btn = document.getElementById("submitBtn");
+  btn.disabled = true;
+  btn.textContent = "記録しています...";
+
+  const now = new Date();
+  const timestamp = now.toLocaleString("ja-JP");
+  try{
+    await graphFetch(`/tables('${CONFIG.tableName}')/rows/add`, {
+      method: "POST",
+      body: JSON.stringify({ values: [[ currentRow.code, currentRow.name, Number(qty), workerName, timestamp, roundType, roundId ]] })
+    });
+    showMsg(`「${currentRow.name}」を ${qty}個 として記録しました（${roundType}）`, "ok");
+    addToRecentLog(currentRow.name, qty, timestamp);
+    setTimeout(backToScan, 1400);
+  }catch(e){
+    showMsg(e.message, "err");
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "この数を記録する";
+  }
+}
+
+/* ---- 自分の直近入力ログ（画面確認用、端末内保存） ---- */
+function addToRecentLog(name, qty, timestamp){
+  recentEntries.unshift({ name, qty, timestamp });
+  recentEntries = recentEntries.slice(0, 5);
+  localStorage.setItem("recentEntries", JSON.stringify(recentEntries));
+  renderRecentLog();
+}
+function renderRecentLog(){
+  const el = document.getElementById("recentLog");
+  if(recentEntries.length === 0){
+    el.innerHTML = '<div class="log-empty">まだ記録がありません</div>';
+    return;
+  }
+  el.innerHTML = recentEntries.map(e =>
+    `<div class="log-line"><span>${e.name}</span><span>${e.qty}個</span></div>`
+  ).join("");
+}
+
+/* ============================================================
+   QRスキャナー
+   ============================================================ */
+let scanner = null;
+function startScanner(){
+  if(scanner) return;
+  scanner = new Html5Qrcode("reader");
+  scanner.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: 220 },
+    (decodedText) => {
+      scanner.pause();
+      lookupCode(decodedText);
+    },
+    ()=>{} // 読み取り失敗時は無視(連続スキャン中)
+  ).catch(e => showMsg("カメラを起動できません。ブラウザのカメラ許可設定をご確認ください。", "err"));
+}
+
+/* ============================================================
+   画面遷移ヘルパー
+   ============================================================ */
+function goToStep(n){
+  document.getElementById("stepScan").classList.toggle("hidden", n!==1);
+  document.getElementById("stepConfirm").classList.toggle("hidden", n!==2);
+  document.getElementById("stepInput").classList.toggle("hidden", n!==3);
+  [1,2,3].forEach(i=>{
+    const dot = document.getElementById("stepDot"+i);
+    dot.classList.toggle("active", i===n);
+    dot.classList.toggle("done", i<n);
+  });
+}
+function goToInput(){ goToStep(3); document.getElementById("newQty").focus(); }
+function backToScan(){
+  goToStep(1);
+  document.getElementById("newQty").value = "";
+  document.getElementById("manualCode").value = "";
+  hideMsg();
+  if(scanner) scanner.resume().catch(()=>{});
+}
+function showMsg(text, type){
+  const el = document.getElementById("msgBox");
+  el.textContent = text;
+  el.className = "msg show " + type;
+}
+function hideMsg(){
+  document.getElementById("msgBox").className = "msg";
+}
+</script>
+</body>
+</html>
