@@ -7,8 +7,8 @@
 
 <!-- QRコード読取ライブラリ -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
-<!-- Microsoft認証ライブラリ(MSAL) -->
-<script src="https://<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
+<!-- Microsoft認証は外部ライブラリを使わず、下部のスクリプトで直接OAuth2(PKCE)を実装しています -->
+
 <style>
   :root{
     --ink:#1a2332;
@@ -223,6 +223,8 @@
   <div id="stepConfirm" class="card hidden">
     <div class="step-head"><span class="step-num">2</span><span class="step-title">商品を確認する</span></div>
     <p class="step-guide">読み取った商品が正しいか確認してください。違う場合は「やり直す」からもう一度スキャンできます。</p>
+    <div class="field-label">商品ID</div>
+    <div class="field-value" id="confId">-</div>
     <div class="field-label">商品コード</div>
     <div class="field-value" id="confCode">-</div>
     <div class="field-label">商品名</div>
@@ -257,79 +259,174 @@
    ============================================================ */
 const CONFIG = {
   // Azure ADアプリ登録で取得したクライアントID
-  clientId: "bc6260b4-4510-4f3a-9cc2-146fd8349ea5",  // 個人のMicrosoftアカウントのみを対象とする場合は "consumers"
-  // 会社/学校アカウントも含める場合は "common"（複数人・複数種のアカウントで使うなら common 推奨）
-  authority: "https://login.microsoftonline.com/common",
+  clientId: "bc6260b4-4510-4f3a-9cc2-146fd8349ea5",
+  // 個人アカウント・組織アカウントどちらでもサインイン可能（common固定でOK。下部のOAuth処理内で使用）
   // このPWAを配置するURL(GitHub Pagesなど)。Azure AD側のリダイレクトURIと一致させる
   redirectUri: window.location.origin + window.location.pathname,
 
   // ---- 共有Excelファイルの指定（複数人で同じファイルを扱うため、パスではなくID指定） ----
-  // 取得方法は下記「共有ファイルIDの調べ方」を参照してください
-  driveId: "D748EBE2BF3DE7F1",  itemId: "D748EBE2BF3DE7F1!sd518815e69c94589ba9f1617209ed80c",  // Excel内のテーブル名(あらかじめテーブル化しておく)
+  driveId: "D748EBE2BF3DE7F1",
+  itemId: "D748EBE2BF3DE7F1!sd518815e69c94589ba9f1617209ed80c",
+
+  // Excel内のテーブル名(あらかじめテーブル化しておく)
   tableName: "在庫テーブル",
-  // マスタ参照用シート（商品コード→商品名の検索に使う。無ければテーブル内から検索）
+  // 商品マスタ（別シートの商品ID・商品コード・商品名の唯一の正解データ）
+  masterTableName: "商品マスタ",
+  masterColumns: { id: 0, code: 1, name: 2 },
   // テーブルの列構成(0始まりの列インデックス) ※追記ログ方式：常に新しい行を追加していく
   // roundType: "月末" or "スポット" / roundId: 月末なら"YYYY-MM"、スポットなら"YYYY-MM-DD"
-  columns: { code: 0, name: 1, qty: 2, worker: 3, timestamp: 4, roundType: 5, roundId: 6 }
+  columns: { id: 0, code: 1, name: 2, qty: 3, worker: 4, timestamp: 5, roundType: 6, roundId: 7 }
 };
 
-/*
-============================================================
-共有ファイルIDの調べ方（初回セットアップ時に1度だけ実施）
-============================================================
-1. https://developer.microsoft.com/graph/graph-explorer を開き、
-   ファイル所有者のMicrosoftアカウントでサインイン
-2. GET https://graph.microsoft.com/v1.0/me/drive/root:/対象フォルダ/ファイル名.xlsx
-   を実行し、レスポンス内の "id"(=itemId) と "parentReference.driveId"(=driveId) を
-   このCONFIGにコピーする
-3. ファイルは事前にOneDrive上で「特定の人と共有」設定を行い、
-   在庫入力を行う全員のMicrosoftアカウントに「編集可能」権限を付与しておくこと
-============================================================
-*/
-
 /* ============================================================
-   MSAL初期化
+   Microsoft認証（外部ライブラリなし・OAuth2 認可コード+PKCE方式）
    ============================================================ */
-const msalInstance = new msal.PublicClientApplication({
-  auth: {
-    clientId: CONFIG.clientId,
-    authority: CONFIG.authority,
-    redirectUri: CONFIG.redirectUri
-  },
-  cache: { cacheLocation: "localStorage" }
-});
+const AUTH_SCOPE = "Files.ReadWrite offline_access";
+const AUTHORIZE_ENDPOINT = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+const TOKEN_ENDPOINT = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
-const GRAPH_SCOPES = ["Files.ReadWrite"];
 let accessToken = null;
-let currentRow = null;   // 検索でヒットした商品情報を保持
+let currentRow = null;
 let workerName = localStorage.getItem("workerName") || "";
 let recentEntries = JSON.parse(localStorage.getItem("recentEntries") || "[]");
-let roundType = "";  // "月末" or "スポット"（起動のたびに選び直す。前回値は引き継がない）
+let roundType = "";
 let roundId = "";
+
+function base64UrlEncode(buffer){
+  let str = "";
+  const bytes = new Uint8Array(buffer);
+  for(let i=0; i<bytes.byteLength; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function randomString(len){
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return base64UrlEncode(arr.buffer).slice(0, len);
+}
+async function sha256(plain){
+  const data = new TextEncoder().encode(plain);
+  return await crypto.subtle.digest("SHA-256", data);
+}
 
 async function signIn(){
   try{
-    const result = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
-    msalInstance.setActiveAccount(result.account);
-    await acquireToken();
-    setStatus(true);
-    document.getElementById("loginScreen").classList.add("hidden");
+    const verifier = randomString(64);
+    const challenge = base64UrlEncode(await sha256(verifier));
+    const state = randomString(16);
+    localStorage.setItem("pkce_verifier", verifier);
+    localStorage.setItem("oauth_state", state);
 
-    if(workerName){
-      document.getElementById("typeScreen").classList.remove("hidden");
-    }else{
-      document.getElementById("workerScreen").classList.remove("hidden");
-    }
+    const params = new URLSearchParams({
+      client_id: CONFIG.clientId,
+      response_type: "code",
+      redirect_uri: CONFIG.redirectUri,
+      response_mode: "query",
+      scope: AUTH_SCOPE,
+      state: state,
+      code_challenge: challenge,
+      code_challenge_method: "S256"
+    });
+    window.location.href = `${AUTHORIZE_ENDPOINT}?${params.toString()}`;
   }catch(e){
     showMsg("サインインに失敗しました: " + e.message, "err");
   }
 }
 
-async function acquireToken(){
-  const account = msalInstance.getActiveAccount();
-  const result = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account });
-  accessToken = result.accessToken;
+async function exchangeCodeForToken(code){
+  const verifier = localStorage.getItem("pkce_verifier");
+  const params = new URLSearchParams({
+    client_id: CONFIG.clientId,
+    grant_type: "authorization_code",
+    code: code,
+    redirect_uri: CONFIG.redirectUri,
+    code_verifier: verifier
+  });
+  const res = await fetch(TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  if(!res.ok){ throw new Error("サインインの完了処理に失敗しました"); }
+  saveTokens(await res.json());
 }
+
+async function refreshAccessToken(){
+  const refreshToken = localStorage.getItem("refresh_token");
+  if(!refreshToken) throw new Error("再サインインが必要です");
+  const params = new URLSearchParams({
+    client_id: CONFIG.clientId,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    scope: AUTH_SCOPE
+  });
+  const res = await fetch(TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  if(!res.ok){ throw new Error("トークンの更新に失敗しました。再度サインインしてください。"); }
+  saveTokens(await res.json());
+}
+
+function saveTokens(data){
+  const expiresAt = Date.now() + (data.expires_in * 1000) - 60000;
+  accessToken = data.access_token;
+  localStorage.setItem("access_token", data.access_token);
+  localStorage.setItem("token_expires_at", String(expiresAt));
+  if(data.refresh_token) localStorage.setItem("refresh_token", data.refresh_token);
+}
+
+async function acquireToken(){
+  const expiresAt = Number(localStorage.getItem("token_expires_at") || 0);
+  if(accessToken && Date.now() < expiresAt) return;
+  await refreshAccessToken();
+}
+
+function afterSignedIn(){
+  setStatus(true);
+  document.getElementById("loginScreen").classList.add("hidden");
+  if(workerName){
+    document.getElementById("typeScreen").classList.remove("hidden");
+  }else{
+    document.getElementById("workerScreen").classList.remove("hidden");
+  }
+}
+
+window.addEventListener("DOMContentLoaded", async () => {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  const error = params.get("error");
+
+  if(error){
+    showMsg("サインインに失敗しました: " + (params.get("error_description") || error), "err");
+    return;
+  }
+
+  if(code){
+    const state = params.get("state");
+    if(state !== localStorage.getItem("oauth_state")){
+      showMsg("認証状態の確認に失敗しました。もう一度サインインしてください。", "err");
+      return;
+    }
+    try{
+      await exchangeCodeForToken(code);
+      window.history.replaceState({}, document.title, window.location.pathname);
+      afterSignedIn();
+    }catch(e){
+      showMsg(e.message, "err");
+    }
+    return;
+  }
+
+  if(localStorage.getItem("refresh_token")){
+    try{
+      await refreshAccessToken();
+      afterSignedIn();
+    }catch(e){
+      // 更新できなければログイン画面のまま
+    }
+  }
+});
 
 function setStatus(connected){
   const el = document.getElementById("connStatus");
@@ -337,7 +434,6 @@ function setStatus(connected){
   el.classList.toggle("connected", connected);
 }
 
-/* ---- 担当者名 ---- */
 function saveWorkerName(){
   const v = document.getElementById("workerNameInput").value.trim();
   if(!v){ return; }
@@ -352,7 +448,6 @@ function openWorkerScreen(){
   document.getElementById("workerScreen").classList.remove("hidden");
 }
 
-/* ---- 棚卸し種別 ---- */
 function pad2(n){ return String(n).padStart(2,"0"); }
 function selectRoundType(type){
   roundType = type;
@@ -385,13 +480,10 @@ function enterMainScreen(){
   startScanner();
 }
 
-/* ============================================================
-   Graph API呼び出し（共有ファイルをID指定でアクセス）
-   ============================================================ */
 const GRAPH_BASE = `https://graph.microsoft.com/v1.0/drives/${CONFIG.driveId}/items/${CONFIG.itemId}/workbook`;
 
 async function graphFetch(path, options={}){
-  await acquireToken(); // 期限切れ対策で毎回サイレント更新
+  await acquireToken();
   const res = await fetch(GRAPH_BASE + path, {
     ...options,
     headers: {
@@ -407,22 +499,23 @@ async function graphFetch(path, options={}){
   return res.status === 204 ? null : res.json();
 }
 
-// 商品コードで商品名を検索（過去の記録行から最初にヒットしたものを使う）
 async function lookupCode(code){
   code = (code||"").trim();
   if(!code){ showMsg("コードが空です", "err"); return; }
   try{
-    showMsg("商品を検索しています...", "ok");
-    const data = await graphFetch(`/tables('${CONFIG.tableName}')/rows`);
+    showMsg("商品マスタを検索しています...", "ok");
+    const data = await graphFetch(`/tables('${CONFIG.masterTableName}')/rows`);
     const rows = data.value;
-    const hit = rows.find(r => String(r.values[0][CONFIG.columns.code]).trim() === code);
+    const mc = CONFIG.masterColumns;
+    const hit = rows.find(r => String(r.values[0][mc.code]).trim() === code);
 
     if(!hit){
-      currentRow = { code, name: "(マスタ未登録の商品コードです。担当者に確認してください)", isNew: true };
+      currentRow = { id: "", code, name: "(商品マスタに未登録のコードです。担当者に確認してください)", isNew: true };
     }else{
       const v = hit.values[0];
-      currentRow = { code: v[CONFIG.columns.code], name: v[CONFIG.columns.name], isNew: false };
+      currentRow = { id: v[mc.id], code: v[mc.code], name: v[mc.name], isNew: false };
     }
+    document.getElementById("confId").textContent = currentRow.id || "-";
     document.getElementById("confCode").textContent = currentRow.code;
     const nameEl = document.getElementById("confName");
     nameEl.textContent = currentRow.name;
@@ -434,7 +527,6 @@ async function lookupCode(code){
   }
 }
 
-// 常に新しい行として追記する（上書きしないので複数人が同時に使っても安全）
 async function submitQty(){
   const qty = document.getElementById("newQty").value;
   if(qty === ""){ showMsg("数を入力してください", "err"); return; }
@@ -447,7 +539,7 @@ async function submitQty(){
   try{
     await graphFetch(`/tables('${CONFIG.tableName}')/rows/add`, {
       method: "POST",
-      body: JSON.stringify({ values: [[ currentRow.code, currentRow.name, Number(qty), workerName, timestamp, roundType, roundId ]] })
+      body: JSON.stringify({ values: [[ currentRow.id, currentRow.code, currentRow.name, Number(qty), workerName, timestamp, roundType, roundId ]] })
     });
     showMsg(`「${currentRow.name}」を ${qty}個 として記録しました（${roundType}）`, "ok");
     addToRecentLog(currentRow.name, qty, timestamp);
@@ -460,7 +552,6 @@ async function submitQty(){
   }
 }
 
-/* ---- 自分の直近入力ログ（画面確認用、端末内保存） ---- */
 function addToRecentLog(name, qty, timestamp){
   recentEntries.unshift({ name, qty, timestamp });
   recentEntries = recentEntries.slice(0, 5);
@@ -478,9 +569,6 @@ function renderRecentLog(){
   ).join("");
 }
 
-/* ============================================================
-   QRスキャナー
-   ============================================================ */
 let scanner = null;
 function startScanner(){
   if(scanner) return;
@@ -492,13 +580,10 @@ function startScanner(){
       scanner.pause();
       lookupCode(decodedText);
     },
-    ()=>{} // 読み取り失敗時は無視(連続スキャン中)
+    ()=>{}
   ).catch(e => showMsg("カメラを起動できません。ブラウザのカメラ許可設定をご確認ください。", "err"));
 }
 
-/* ============================================================
-   画面遷移ヘルパー
-   ============================================================ */
 function goToStep(n){
   document.getElementById("stepScan").classList.toggle("hidden", n!==1);
   document.getElementById("stepConfirm").classList.toggle("hidden", n!==2);
